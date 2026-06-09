@@ -1,5 +1,5 @@
-
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
+from pypdf import PdfReader
 from pydantic import BaseModel, Field
 from typing import Annotated
 from groq import Groq
@@ -11,6 +11,11 @@ load_dotenv()
 app = FastAPI()
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 MODEL_NAME = os.getenv("MODEL_NAME")
+
+# create dir for files if needed
+os.makedirs('uploads', exist_ok = True)
+
+# defining the basemodels for requests and responses
 class QueryRequest(BaseModel):
     user: str
     query: Annotated[str, Field(min_length=1)]
@@ -58,3 +63,12 @@ def ask_question(request: QueryRequest) -> QueryResponse:
         answer = answer_directly(request.query) # this is the default fallback
 
     return QueryResponse(ans=answer)
+
+
+# uploading endpoints
+@app.post('/upload')
+async def upload_document(file: UploadFile):
+    contents = await file.read()
+    with open(f'uploads/{file.filename}','wb') as f:
+        f.write(contents)
+    return {'filename': file.filename, 'status': 'uploaded'}
