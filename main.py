@@ -41,8 +41,25 @@ def route_query(query: str) -> str:
 )
     return model_resp.choices[0].message.content.strip().upper()
 
-def retrieve_and_answer(query: str) -> str:
-    return "RAG yet to be implemented"
+
+# retrieve_and_answer() function
+def retrieve_and_answer(query: str, groq_client, n_results: int = 3) -> str:
+    """
+    Creating the retrieval function to get the context about the files referenced.
+    """
+    collection = dbclient.get_or_create_collection("documents")
+    q_embed = embed_chunks([query])[0]
+    n_results = 5 # say top 5 results
+    res= collection.query(query_embeddings = [q_embed], n_results = n_results) 
+    context = " ".join(res['documents'][0])
+    response = client.chat.completions.create(
+        model = MODEL_NAME, messages = [
+            {'role':'system', 'content':f'you are a helpful assistant who will use this context to answer the queries : {context}'},
+            {'role':'user','content':query}
+        ]
+    )
+    return response.choices[0].message.content.strip()
+
 
 def answer_directly(query: str) -> str:
     response = client.chat.completions.create(
@@ -126,6 +143,8 @@ def store_in_chromadb(chunks: list[str], embeddings: list[list[str]], doc_id: st
     return collection
 
 
+
+
 if __name__ == "__main__":
     process = psutil.Process(os.getpid())
     start = time.time()
@@ -137,6 +156,8 @@ if __name__ == "__main__":
     collection = store_in_chromadb(chunks, embeddings, "test_doc")
     print("stored successfully")
     print(collection.count())
+    answer = retrieve_and_answer("summarize the document", client)
+    print(answer)
     mem_after = process.memory_info().rss / (1024 **2)
     print(f"Time: {time.time() - start:.2f}s")
     print(f"Memory delta: {mem_after - mem_before:.2f} MB")
