@@ -1,5 +1,5 @@
 from sentence_transformers import SentenceTransformer
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from pypdf import PdfReader
 from pydantic import BaseModel, Field
 from typing import Annotated
@@ -11,7 +11,7 @@ import os, psutil, time
 load_dotenv()
 
 app = FastAPI()
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 MODEL_NAME = os.getenv("MODEL_NAME")
 model = SentenceTransformer("all-MiniLM-L6-v2")
 dbclient = chromadb.PersistentClient(path = './chroma_store')
@@ -34,9 +34,9 @@ def check_status():
 
 # helper functions
 def route_query(query: str) -> str:
-    model_resp = client.chat.completions.create(
+    model_resp = groq_client.chat.completions.create(
          model = MODEL_NAME,
-        messages = [{'role': 'system', 'content':'you are a decision router. you will look at the query and decide if you need to look up the documents. give only either YES/NO'},
+        messages = [{'role': 'system', 'content':'you are a decision router. given a user query, decide if answering it requires retrieving information from uploaded documents. say YES if the query asks about specific documents, files, summaries, or domain-specific content. say NO if it is general knowledge. respond with only YES or NO.'},
         {'role':'user','content':query}]
 )
     return model_resp.choices[0].message.content.strip().upper()
@@ -52,7 +52,7 @@ def retrieve_and_answer(query: str, groq_client, n_results: int = 3) -> str:
     n_results = 5 # say top 5 results
     res= collection.query(query_embeddings = [q_embed], n_results = n_results) 
     context = " ".join(res['documents'][0])
-    response = client.chat.completions.create(
+    response = groq_client.chat.completions.create(
         model = MODEL_NAME, messages = [
             {'role':'system', 'content':f'you are a helpful assistant who will use this context to answer the queries : {context}'},
             {'role':'user','content':query}
@@ -62,7 +62,7 @@ def retrieve_and_answer(query: str, groq_client, n_results: int = 3) -> str:
 
 
 def answer_directly(query: str) -> str:
-    response = client.chat.completions.create(
+    response = groq_client.chat.completions.create(
         model = MODEL_NAME,
         messages = [
             {'role':'system', 'content': 'you are a helpful assistant who answers in the simplest way'},
@@ -78,7 +78,7 @@ def ask_question(request: QueryRequest) -> QueryResponse:
     decision = route_query(request.query)
     print(f'Query:{request.query} --> decision: {decision}') # debugging
     if 'YES' in decision:
-        answer = retrieve_and_answer(request.query)
+        answer = retrieve_and_answer(request.query, groq_client)
     elif 'NO' in decision:
         answer = answer_directly(request.query)
     else:
@@ -91,9 +91,16 @@ def ask_question(request: QueryRequest) -> QueryResponse:
 @app.post('/upload')
 async def upload_document(file: UploadFile):
     contents = await file.read()
-    with open(f'uploads/{file.filename}','wb') as f:
+    file_path = f'uploads/{file.filename}'
+    with open(file_path, 'wb') as f:
         f.write(contents)
-    return {'filename': file.filename, 'status': 'uploaded'}
+    text = parse_pdf(file_path)
+    if not text.strip():
+        raise HTTPException(status_code = 400, detail = "PDF is not read right or its empty")
+    chunks = chunk_text(text)
+    embeddings = embed_chunks(chunks)
+    collection = store_in_chromadb(chunks, embeddings, doc_id = file.filename.split(".")[0])
+    return {'filename': file.filename, 'status': True, 'chunks': collection.count()}
 
 
 """
@@ -139,11 +146,11 @@ def store_in_chromadb(chunks: list[str], embeddings: list[list[str]], doc_id: st
     """
     collection =  dbclient.get_or_create_collection('documents')
     ids = [f"{doc_id}_chunk_{i}" for i in range(len(chunks))]
-    collection.add(documents = chunks, embeddings = embeddings, ids = ids)
+    collection.upsert(documents = chunks, embeddings = embeddings, ids = ids)
     return collection
 
 
-
+'''
 
 if __name__ == "__main__":
     process = psutil.Process(os.getpid())
@@ -161,3 +168,4 @@ if __name__ == "__main__":
     mem_after = process.memory_info().rss / (1024 **2)
     print(f"Time: {time.time() - start:.2f}s")
     print(f"Memory delta: {mem_after - mem_before:.2f} MB")
+'''
