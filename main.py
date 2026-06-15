@@ -1,16 +1,21 @@
+from sentence_transformers import SentenceTransformer
 from fastapi import FastAPI, UploadFile, File
 from pypdf import PdfReader
 from pydantic import BaseModel, Field
 from typing import Annotated
 from groq import Groq
 from dotenv import load_dotenv
-import os
+import chromadb
+import os, psutil, time
 
 load_dotenv()
 
 app = FastAPI()
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 MODEL_NAME = os.getenv("MODEL_NAME")
+model = SentenceTransformer("all-MiniLM-L6-v2")
+dbclient = chromadb.PersistentClient(path = './chroma_store')
+
 
 # create dir for files if needed
 os.makedirs('uploads', exist_ok = True)
@@ -72,3 +77,66 @@ async def upload_document(file: UploadFile):
     with open(f'uploads/{file.filename}','wb') as f:
         f.write(contents)
     return {'filename': file.filename, 'status': 'uploaded'}
+
+
+"""
+now we work on creating the file parsing and chunking
+"""
+
+def parse_pdf(file_path: str) -> str:
+    """
+    This function utilises the PdfReader library to parse the pages of the given pdf
+    """
+    if not file_path:
+        return "Error parsing pdf"
+    reader = PdfReader(file_path)
+    pages = [page.extract_text() for page in reader.pages if page.extract_text() != None]
+    return "\n\n".join(pages)
+
+
+def chunk_text(text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> list[str]:
+    """
+    Chunk the text with a simple method of taking consecutive text, 
+    store all the chunks in a list
+    """
+    chunks = []
+    start = 0
+    while start < len(text):
+        chunk = text[start: start + chunk_size]
+        chunks.append(chunk)
+        start = start + chunk_size - chunk_overlap
+    return chunks
+
+# function to develop embeddings - enter the **Sentence Transformer**
+def embed_chunks(chunks: list[str]) -> list[list[float]]:
+    """
+    Creating the embeddings of the chunks using MiniLM model.
+    """
+    embeddings = model.encode(chunks)
+    return embeddings.tolist()
+
+# storing inside the vector store
+def store_in_chromadb(chunks: list[str], embeddings: list[list[str]], doc_id: str):
+    """
+    Stores the chunks and embeddings inside the collection we create
+    """
+    collection =  dbclient.get_or_create_collection('documents')
+    ids = [f"{doc_id}_chunk_{i}" for i in range(len(chunks))]
+    collection.add(documents = chunks, embeddings = embeddings, ids = ids)
+    return collection
+
+
+if __name__ == "__main__":
+    process = psutil.Process(os.getpid())
+    start = time.time()
+    mem_before = process.memory_info().rss / (1024**2)
+
+    text = parse_pdf("/mnt/c/Users/DELL/Downloads/Abstract_v2.pdf")
+    chunks = chunk_text(text)
+    embeddings = embed_chunks(chunks)
+    collection = store_in_chromadb(chunks, embeddings, "test_doc")
+    print("stored successfully")
+    print(collection.count())
+    mem_after = process.memory_info().rss / (1024 **2)
+    print(f"Time: {time.time() - start:.2f}s")
+    print(f"Memory delta: {mem_after - mem_before:.2f} MB")
