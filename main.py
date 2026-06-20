@@ -1,5 +1,6 @@
 from sentence_transformers import SentenceTransformer
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from pathlib import Path
 from pypdf import PdfReader
 from pydantic import BaseModel, Field
 from typing import Annotated
@@ -24,6 +25,7 @@ os.makedirs('uploads', exist_ok = True)
 class QueryRequest(BaseModel):
     user: str
     query: Annotated[str, Field(min_length=1)]
+    doc_id: str | None = None
 
 class QueryResponse(BaseModel):
     ans: str
@@ -43,14 +45,18 @@ def route_query(query: str) -> str:
 
 
 # retrieve_and_answer() function
-def retrieve_and_answer(query: str, groq_client, n_results: int = 3) -> str:
+def retrieve_and_answer(query: str, groq_client, doc_id: str | None = None, n_results: int = 3) -> str:
     """
     Creating the retrieval function to get the context about the files referenced.
     """
     collection = dbclient.get_or_create_collection("documents")
     q_embed = embed_chunks([query])[0]
     n_results = 5 # say top 5 results
-    res= collection.query(query_embeddings = [q_embed], n_results = n_results) 
+    if doc_id:
+        res= collection.query(query_embeddings = [q_embed], n_results = n_results, where = {'doc_id':doc_id}) 
+    else:
+        res= collection.query(query_embeddings = [q_embed], n_results = n_results) 
+    print(res['metadatas'])
     context = " ".join(res['documents'][0])
     response = groq_client.chat.completions.create(
         model = MODEL_NAME, messages = [
@@ -78,7 +84,7 @@ def ask_question(request: QueryRequest) -> QueryResponse:
     decision = route_query(request.query)
     print(f'Query:{request.query} --> decision: {decision}') # debugging
     if 'YES' in decision:
-        answer = retrieve_and_answer(request.query, groq_client)
+        answer = retrieve_and_answer(request.query, groq_client, request.doc_id)
     elif 'NO' in decision:
         answer = answer_directly(request.query)
     else:
@@ -99,7 +105,7 @@ async def upload_document(file: UploadFile):
         raise HTTPException(status_code = 400, detail = "PDF is not read right or its empty")
     chunks = chunk_text(text)
     embeddings = embed_chunks(chunks)
-    collection = store_in_chromadb(chunks, embeddings, doc_id = file.filename.split(".")[0])
+    collection = store_in_chromadb(chunks, embeddings, doc_id = Path(file.filename).stem )
     return {'filename': file.filename, 'status': True, 'chunks': collection.count()}
 
 
@@ -146,7 +152,10 @@ def store_in_chromadb(chunks: list[str], embeddings: list[list[str]], doc_id: st
     """
     collection =  dbclient.get_or_create_collection('documents')
     ids = [f"{doc_id}_chunk_{i}" for i in range(len(chunks))]
-    collection.upsert(documents = chunks, embeddings = embeddings, ids = ids)
+    metadata = [
+    {"doc_id": doc_id} for i in range(len(chunks))
+    ]
+    collection.upsert(documents = chunks, embeddings = embeddings, metadatas = metadata, ids = ids)
     return collection
 
 
